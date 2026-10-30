@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   linux-runner:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
       GITLAB_URL: ${{ vars.GITLAB_URL }}
