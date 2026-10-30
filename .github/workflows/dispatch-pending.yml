@@ -1,0 +1,92 @@
+name: Dispatch GitLab SaaS runners
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: gitlab-saas-runner-dispatcher
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      GITLAB_API_URL: https://gitlab.com/api/v4
+      GITLAB_PROJECT_ID: '81321701'
+      GITLAB_READ_TOKEN: ${{ secrets.GITLAB_READ_TOKEN }}
+      RUNNER_TAG: saas-github-linux
+      RUNNER_WORKFLOW: gitlab-runner-linux.yml
+
+    steps:
+      - name: Dispatch pending jobs
+        run: |
+          set -euo pipefail
+          test -n "$GITLAB_READ_TOKEN"
+
+          pending_json="$RUNNER_TEMP/pending-jobs.json"
+          deadline=$((SECONDS + 240))
+
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            curl -fsS --retry 3 --retry-delay 2 --max-time 30 \
+              -H "PRIVATE-TOKEN: $GITLAB_READ_TOKEN" \
+              "$GITLAB_API_URL/projects/$GITLAB_PROJECT_ID/jobs?scope%5B%5D=pending&per_page=100" \
+              -o "$pending_json"
+
+            jq -e --arg tag "$RUNNER_TAG" '
+              type == "array" and
+              all(.[]; (.tag_list | type) == "array")
+            ' "$pending_json" >/dev/null
+
+            mapfile -t pending_jobs < <(
+              jq -c --arg tag "$RUNNER_TAG" '
+                .[]
+                | select((.tag_list // []) | index($tag))
+                | {
+                    job_id: .id,
+                    pipeline_id: .pipeline.id,
+                    gitlab_ref: .ref
+                  }
+              ' "$pending_json"
+            )
+
+            active_count="$(
+              gh run list \
+                --repo "$GH_REPO" \
+                --workflow "$RUNNER_WORKFLOW" \
+                --limit 100 \
+                --json status \
+                --jq '[.[] | select(.status == "queued" or .status == "in_progress")] | length'
+            )"
+            pending_count="${#pending_jobs[@]}"
+            available=$((pending_count - active_count))
+            if [ "$available" -lt 0 ]; then available=0; fi
+            if [ "$available" -gt 8 ]; then available=8; fi
+
+            if [ "$available" -gt 0 ]; then
+              echo "Dispatching $available runner(s): $pending_count pending, $active_count active"
+              for ((i = 0; i < available; i++)); do
+                item="${pending_jobs[$i]}"
+                job_id="$(jq -r '.job_id' <<<"$item")"
+                pipeline_id="$(jq -r '.pipeline_id' <<<"$item")"
+                gitlab_ref="$(jq -r '.gitlab_ref' <<<"$item")"
+                gh workflow run "$RUNNER_WORKFLOW" \
+                  --repo "$GH_REPO" \
+                  --ref main \
+                  -f "pipeline_id=$pipeline_id" \
+                  -f "gitlab_ref=$gitlab_ref" \
+                  -f "job_id=$job_id" \
+                  -f "runner_tags=$RUNNER_TAG"
+              done
+            fi
+
+            sleep 15
+          done

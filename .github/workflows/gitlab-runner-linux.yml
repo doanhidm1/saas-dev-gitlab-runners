@@ -11,6 +11,10 @@ on:
         description: GitLab ref being run
         required: true
         type: string
+      job_id:
+        description: GitLab job ID
+        required: true
+        type: string
       runner_tags:
         description: GitLab runner tag
         required: true
@@ -21,8 +25,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: gitlab-saas-${{ inputs.gitlab_ref }}
-  cancel-in-progress: true
+  group: gitlab-saas-job-${{ inputs.job_id }}
+  cancel-in-progress: false
 
 jobs:
   linux-runner:
@@ -93,7 +97,9 @@ jobs:
           }
           trap cleanup EXIT INT TERM
 
-          echo "GitLab SaaS runner $runner_name is accepting pipeline ${{ inputs.pipeline_id }} at ref ${{ inputs.gitlab_ref }}"
-          gitlab-runner run \
+          echo "GitLab SaaS runner $runner_name is accepting job ${{ inputs.job_id }} from pipeline ${{ inputs.pipeline_id }} at ref ${{ inputs.gitlab_ref }}"
+          gitlab-runner run-single \
             --config "$RUNNER_CONFIG" \
-            --working-directory "$RUNNER_WORKDIR"
+            -r "$runner_name" \
+            --max-builds 1 \
+            --wait-timeout 600
