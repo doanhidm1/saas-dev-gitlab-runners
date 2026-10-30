@@ -50,7 +50,7 @@ jobs:
           gitlab-runner run-single \
             --url "$GITLAB_URL" \
             --token "$GITLAB_RUNNER_TOKEN" \
-            -r "$runner_name" \
+            --name "$runner_name" \
             --executor docker \
             --docker-image alpine:3.20 \
             --docker-volumes /cache \
