@@ -24,7 +24,7 @@ jobs:
     env:
       GITLAB_URL: https://gitlab.com
       GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
-      PNPM_CACHE_DIR: ${{ runner.temp }}/egtools-pnpm-store
+      PNPM_CACHE_DIR: ${{ github.workspace }}/.cache/egtools-pnpm-store
       PNPM_CACHE_KEY: pnpm-store-linux-v12-${{ inputs.cache_key }}
       RUNNER_LOG: /tmp/gitlab-runner-private.log
 
