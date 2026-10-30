@@ -1,0 +1,65 @@
+name: GitLab Runner SaaS Linux Image Build
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: gitlab-saas-linux-build-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  linux-build-runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      GITLAB_URL: https://gitlab.com
+      GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_BUILD_RUNNER_TOKEN }}
+      RUNNER_LOG: /tmp/gitlab-runner-private.log
+
+    steps:
+      - name: Validate runner configuration
+        run: |
+          set -euo pipefail
+          test -n "${GITLAB_RUNNER_TOKEN:-}"
+          test "$(uname -m)" = "x86_64"
+          docker version
+          docker buildx version
+
+      - name: Install GitLab Runner
+        run: |
+          set -euo pipefail
+          runner_url="https://gitlab-runner-downloads.s3.amazonaws.com/v19.5.2/binaries/gitlab-runner-linux-amd64"
+          runner_sha256="1c1752101f5b0f212615ad2c674d8f3499de96d9377f31aed1e3eecdbd068de1"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 \
+            "$runner_url" \
+            -o /tmp/gitlab-runner
+          printf '%s  %s\n' "$runner_sha256" /tmp/gitlab-runner | sha256sum -c -
+          sudo install -m 0755 /tmp/gitlab-runner /usr/local/bin/gitlab-runner
+          gitlab-runner --version
+
+      - name: Run exactly one trusted image-build job
+        run: |
+          set -euo pipefail
+          runner_name="gh-linux-build-${GITHUB_RUN_ID}"
+          umask 077
+          set +e
+          gitlab-runner run-single \
+            --url "$GITLAB_URL" \
+            --token "$GITLAB_RUNNER_TOKEN" \
+            --name "$runner_name" \
+            --executor docker \
+            --docker-image alpine:3.20 \
+            --docker-volumes /var/run/docker.sock:/var/run/docker.sock \
+            --max-builds 1 \
+            --wait-timeout 600 \
+            >"$RUNNER_LOG" 2>&1
+          runner_status=$?
+          set -e
+          rm -f "$RUNNER_LOG"
+          if [ "$runner_status" -ne 0 ]; then
+            echo "GitLab image-build runner exited with status $runner_status; inspect the GitLab job trace."
+            exit "$runner_status"
+          fi
+          echo "GitLab image-build runner finished its one-job session."

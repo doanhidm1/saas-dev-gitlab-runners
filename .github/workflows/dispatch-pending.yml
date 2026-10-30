@@ -24,7 +24,10 @@ jobs:
       GITLAB_PROJECT_ID: '81321701'
       GITLAB_READ_TOKEN: ${{ secrets.GITLAB_READ_TOKEN }}
       RUNNER_TAG: saas-github-linux
+      BUILD_RUNNER_TAG: saas-github-build
       RUNNER_WORKFLOW: gitlab-runner-linux.yml
+      BUILD_RUNNER_WORKFLOW: gitlab-runner-linux-build.yml
+      MAX_ACTIVE_RUNNERS: '16'
 
     steps:
       - name: Dispatch pending jobs
@@ -46,15 +49,23 @@ jobs:
               all(.[]; (.tag_list | type) == "array")
             ' "$pending_json" >/dev/null
 
-            mapfile -t pending_jobs < <(
+            mapfile -t pending_test_jobs < <(
               jq -c --arg tag "$RUNNER_TAG" '
+                .[]
+                | select((.tag_list // []) | index($tag))
+                | select((.pipeline.sha // "") | test("^[0-9a-f]{40,64}$"))
+                | {cache_key: .pipeline.sha}
+              ' "$pending_json"
+            )
+            mapfile -t pending_build_jobs < <(
+              jq -c --arg tag "$BUILD_RUNNER_TAG" '
                 .[]
                 | select((.tag_list // []) | index($tag))
                 | .id
               ' "$pending_json"
             )
 
-            active_count="$(
+            active_test_count="$(
               gh run list \
                 --repo "$GH_REPO" \
                 --workflow "$RUNNER_WORKFLOW" \
@@ -62,15 +73,37 @@ jobs:
                 --json status \
                 --jq '[.[] | select(.status == "queued" or .status == "in_progress")] | length'
             )"
-            pending_count="${#pending_jobs[@]}"
-            available=$((pending_count - active_count))
+            active_build_count="$(
+              gh run list \
+                --repo "$GH_REPO" \
+                --workflow "$BUILD_RUNNER_WORKFLOW" \
+                --limit 100 \
+                --json status \
+                --jq '[.[] | select(.status == "queued" or .status == "in_progress")] | length'
+            )"
+            test_count="${#pending_test_jobs[@]}"
+            build_count="${#pending_build_jobs[@]}"
+            active_count=$((active_test_count + active_build_count))
+            available=$((MAX_ACTIVE_RUNNERS - active_count))
             if [ "$available" -lt 0 ]; then available=0; fi
-            if [ "$available" -gt 8 ]; then available=8; fi
+            dispatch_test=$test_count
+            if [ "$dispatch_test" -gt "$available" ]; then dispatch_test=$available; fi
+            available=$((available - dispatch_test))
+            dispatch_build=$build_count
+            if [ "$dispatch_build" -gt "$available" ]; then dispatch_build=$available; fi
+            dispatch_total=$((dispatch_test + dispatch_build))
 
-            if [ "$available" -gt 0 ]; then
-              echo "Dispatching $available runner(s): $pending_count pending, $active_count active"
-              for ((i = 0; i < available; i++)); do
+            if [ "$dispatch_total" -gt 0 ]; then
+              echo "Dispatching $dispatch_total runner(s): $test_count test pending, $build_count build pending, $active_count active"
+              for ((i = 0; i < dispatch_test; i++)); do
+                cache_key="$(jq -r '.cache_key' <<<"${pending_test_jobs[$i]}")"
                 gh workflow run "$RUNNER_WORKFLOW" \
+                  --repo "$GH_REPO" \
+                  --ref main \
+                  -f "cache_key=$cache_key"
+              done
+              for ((i = 0; i < dispatch_build; i++)); do
+                gh workflow run "$BUILD_RUNNER_WORKFLOW" \
                   --repo "$GH_REPO" \
                   --ref main
               done

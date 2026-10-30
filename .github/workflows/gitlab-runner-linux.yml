@@ -2,11 +2,17 @@ name: GitLab Runner SaaS Linux
 
 on:
   workflow_dispatch:
+    inputs:
+      cache_key:
+        description: Immutable GitLab commit hash used to version the pnpm store
+        required: true
+        type: string
 
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
-  group: gitlab-saas-linux-${{ github.run_id }}
+  group: gitlab-saas-linux-${{ inputs.cache_key }}-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -18,16 +24,28 @@ jobs:
     env:
       GITLAB_URL: https://gitlab.com
       GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
+      PNPM_CACHE_DIR: ${{ runner.temp }}/egtools-pnpm-store
+      PNPM_CACHE_KEY: pnpm-store-linux-v12-${{ inputs.cache_key }}
       RUNNER_LOG: /tmp/gitlab-runner-private.log
 
     steps:
+      - name: Restore pnpm package store
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ env.PNPM_CACHE_DIR }}
+          key: ${{ env.PNPM_CACHE_KEY }}
+          restore-keys: |
+            pnpm-store-linux-v12-
+
       - name: Validate runner configuration
         run: |
           set -euo pipefail
           test -n "${GITLAB_RUNNER_TOKEN:-}"
+          test -n "${PNPM_CACHE_DIR:-}"
           test "$(uname -m)" = "x86_64"
           docker version
           docker buildx version
+          mkdir -p "$PNPM_CACHE_DIR"
 
       - name: Install GitLab Runner
         run: |
@@ -53,8 +71,7 @@ jobs:
             --name "$runner_name" \
             --executor docker \
             --docker-image alpine:3.20 \
-            --docker-volumes /cache \
-            --docker-volumes /var/run/docker.sock:/var/run/docker.sock \
+            --docker-volumes "$PNPM_CACHE_DIR:/cache" \
             --max-builds 1 \
             --wait-timeout 600 \
             >"$RUNNER_LOG" 2>&1
@@ -66,3 +83,11 @@ jobs:
             exit "$runner_status"
           fi
           echo "GitLab runner finished its one-job session."
+
+      - name: Save pnpm package store
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ env.PNPM_CACHE_DIR }}
+          key: ${{ env.PNPM_CACHE_KEY }}
