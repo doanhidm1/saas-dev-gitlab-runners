@@ -50,11 +50,7 @@ jobs:
               jq -c --arg tag "$RUNNER_TAG" '
                 .[]
                 | select((.tag_list // []) | index($tag))
-                | {
-                    job_id: .id,
-                    pipeline_id: .pipeline.id,
-                    gitlab_ref: .ref
-                  }
+                | .id
               ' "$pending_json"
             )
 
@@ -74,17 +70,9 @@ jobs:
             if [ "$available" -gt 0 ]; then
               echo "Dispatching $available runner(s): $pending_count pending, $active_count active"
               for ((i = 0; i < available; i++)); do
-                item="${pending_jobs[$i]}"
-                job_id="$(jq -r '.job_id' <<<"$item")"
-                pipeline_id="$(jq -r '.pipeline_id' <<<"$item")"
-                gitlab_ref="$(jq -r '.gitlab_ref' <<<"$item")"
                 gh workflow run "$RUNNER_WORKFLOW" \
                   --repo "$GH_REPO" \
-                  --ref main \
-                  -f "pipeline_id=$pipeline_id" \
-                  -f "gitlab_ref=$gitlab_ref" \
-                  -f "job_id=$job_id" \
-                  -f "runner_tags=$RUNNER_TAG"
+                  --ref main
               done
             fi
 

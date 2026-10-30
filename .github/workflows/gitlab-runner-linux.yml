@@ -2,104 +2,67 @@ name: GitLab Runner SaaS Linux
 
 on:
   workflow_dispatch:
-    inputs:
-      pipeline_id:
-        description: GitLab pipeline ID
-        required: true
-        type: string
-      gitlab_ref:
-        description: GitLab ref being run
-        required: true
-        type: string
-      job_id:
-        description: GitLab job ID
-        required: true
-        type: string
-      runner_tags:
-        description: GitLab runner tag
-        required: true
-        default: saas-github-linux
-        type: string
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: gitlab-saas-job-${{ inputs.job_id }}
+  group: gitlab-saas-linux-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
   linux-runner:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # GitHub cancels a job at six hours. Keep setup, one GitLab job, and cleanup
+    # inside a 5h30m envelope.
+    timeout-minutes: 330
     env:
-      GITLAB_URL: ${{ vars.GITLAB_URL }}
+      GITLAB_URL: https://gitlab.com
       GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
-      RUNNER_CONFIG: /tmp/gitlab-runner-linux/config.toml
-      RUNNER_WORKDIR: /tmp/gitlab-runner-linux/work
+      RUNNER_LOG: /tmp/gitlab-runner-private.log
 
     steps:
       - name: Validate runner configuration
         run: |
           set -euo pipefail
-          test -n "${GITLAB_URL:-}"
           test -n "${GITLAB_RUNNER_TOKEN:-}"
-          test -n '${{ inputs.runner_tags }}'
+          test "$(uname -m)" = "x86_64"
           docker version
           docker buildx version
 
       - name: Install GitLab Runner
         run: |
           set -euo pipefail
-          curl -fsSL \
-            https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64 \
+          runner_url="https://gitlab-runner-downloads.s3.amazonaws.com/v19.5.2/binaries/gitlab-runner-linux-amd64"
+          runner_sha256="1c1752101f5b0f212615ad2c674d8f3499de96d9377f31aed1e3eecdbd068de1"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 \
+            "$runner_url" \
             -o /tmp/gitlab-runner
+          printf '%s  %s\n' "$runner_sha256" /tmp/gitlab-runner | sha256sum -c -
           sudo install -m 0755 /tmp/gitlab-runner /usr/local/bin/gitlab-runner
           gitlab-runner --version
 
-      - name: Register and run GitLab Runner
+      - name: Run exactly one isolated GitLab job
         run: |
           set -euo pipefail
           runner_name="gh-linux-${GITHUB_RUN_ID}"
-          mkdir -p "$(dirname "$RUNNER_CONFIG")" "$RUNNER_WORKDIR"
-
-          gitlab-runner register \
-            --config "$RUNNER_CONFIG" \
-            --non-interactive \
+          umask 077
+          set +e
+          gitlab-runner run-single \
             --url "$GITLAB_URL" \
             --token "$GITLAB_RUNNER_TOKEN" \
-            --name "$runner_name" \
+            -r "$runner_name" \
             --executor docker \
             --docker-image alpine:3.20 \
             --docker-volumes /cache \
             --docker-volumes /var/run/docker.sock:/var/run/docker.sock \
-            --tag-list '${{ inputs.runner_tags }}' \
-            --run-untagged=false \
-            --locked=false
-
-          python3 - "$RUNNER_CONFIG" <<'PY'
-          from pathlib import Path
-          import re
-          import sys
-
-          path = Path(sys.argv[1])
-          text = path.read_text()
-          text = re.sub(r"^concurrent = \d+", "concurrent = 4", text, count=1, flags=re.M)
-          if "request_concurrency" in text:
-              text = re.sub(r"request_concurrency = \d+", "request_concurrency = 4", text)
-          else:
-              text = text.replace("  executor =", "  request_concurrency = 4\n  executor =", 1)
-          path.write_text(text)
-          PY
-
-          cleanup() {
-            gitlab-runner unregister --config "$RUNNER_CONFIG" --name "$runner_name" || true
-          }
-          trap cleanup EXIT INT TERM
-
-          echo "GitLab SaaS runner $runner_name is accepting job ${{ inputs.job_id }} from pipeline ${{ inputs.pipeline_id }} at ref ${{ inputs.gitlab_ref }}"
-          gitlab-runner run-single \
-            --config "$RUNNER_CONFIG" \
-            -r "$runner_name" \
             --max-builds 1 \
-            --wait-timeout 600
+            --wait-timeout 600 \
+            >"$RUNNER_LOG" 2>&1
+          runner_status=$?
+          set -e
+          rm -f "$RUNNER_LOG"
+          if [ "$runner_status" -ne 0 ]; then
+            echo "GitLab runner exited with status $runner_status; inspect the GitLab job trace."
+            exit "$runner_status"
+          fi
+          echo "GitLab runner finished its one-job session."
