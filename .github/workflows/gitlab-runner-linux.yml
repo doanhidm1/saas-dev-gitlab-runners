@@ -7,6 +7,13 @@ on:
         description: Immutable GitLab commit hash used to version the pnpm store
         required: true
         type: string
+      cache_enabled:
+        description: Whether this GitLab job installs pnpm dependencies
+        required: true
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 permissions:
   contents: read
@@ -30,6 +37,7 @@ jobs:
 
     steps:
       - name: Restore pnpm package store
+        if: ${{ inputs.cache_enabled == 'true' }}
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ env.PNPM_CACHE_DIR }}
@@ -85,7 +93,7 @@ jobs:
           echo "GitLab runner finished its one-job session."
 
       - name: Save pnpm package store
-        if: always()
+        if: ${{ always() && inputs.cache_enabled == 'true' }}
         continue-on-error: true
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:

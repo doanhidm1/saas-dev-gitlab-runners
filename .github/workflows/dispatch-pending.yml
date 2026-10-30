@@ -54,7 +54,15 @@ jobs:
                 .[]
                 | select((.tag_list // []) | index($tag))
                 | select((.pipeline.sha // "") | test("^[0-9a-f]{40,64}$"))
-                | {cache_key: .pipeline.sha}
+                | . as $job
+                | {
+                    cache_key: $job.pipeline.sha,
+                    cache_enabled: (
+                      ["secret_detection", "keploy-api-regression", "renovate", "snyk-open-source-scheduled"]
+                      | index($job.name)
+                      | not
+                    )
+                  }
               ' "$pending_json"
             )
             mapfile -t pending_build_jobs < <(
@@ -97,10 +105,12 @@ jobs:
               echo "Dispatching $dispatch_total runner(s): $test_count test pending, $build_count build pending, $active_count active"
               for ((i = 0; i < dispatch_test; i++)); do
                 cache_key="$(jq -r '.cache_key' <<<"${pending_test_jobs[$i]}")"
+                cache_enabled="$(jq -r '.cache_enabled' <<<"${pending_test_jobs[$i]}")"
                 gh workflow run "$RUNNER_WORKFLOW" \
                   --repo "$GH_REPO" \
                   --ref main \
-                  -f "cache_key=$cache_key"
+                  -f "cache_key=$cache_key" \
+                  -f "cache_enabled=$cache_enabled"
               done
               for ((i = 0; i < dispatch_build; i++)); do
                 gh workflow run "$BUILD_RUNNER_WORKFLOW" \
