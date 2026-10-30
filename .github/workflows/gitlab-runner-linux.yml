@@ -1,0 +1,99 @@
+name: GitLab Runner SaaS Linux
+
+on:
+  workflow_dispatch:
+    inputs:
+      pipeline_id:
+        description: GitLab pipeline ID
+        required: true
+        type: string
+      gitlab_ref:
+        description: GitLab ref being run
+        required: true
+        type: string
+      runner_tags:
+        description: GitLab runner tag
+        required: true
+        default: saas-github-linux
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitlab-saas-${{ inputs.gitlab_ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-runner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      GITLAB_URL: ${{ vars.GITLAB_URL }}
+      GITLAB_RUNNER_TOKEN: ${{ secrets.GITLAB_RUNNER_TOKEN }}
+      RUNNER_CONFIG: /tmp/gitlab-runner-linux/config.toml
+      RUNNER_WORKDIR: /tmp/gitlab-runner-linux/work
+
+    steps:
+      - name: Validate runner configuration
+        run: |
+          set -euo pipefail
+          test -n "${GITLAB_URL:-}"
+          test -n "${GITLAB_RUNNER_TOKEN:-}"
+          test -n '${{ inputs.runner_tags }}'
+          docker version
+          docker buildx version
+
+      - name: Install GitLab Runner
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-linux-amd64 \
+            -o /tmp/gitlab-runner
+          sudo install -m 0755 /tmp/gitlab-runner /usr/local/bin/gitlab-runner
+          gitlab-runner --version
+
+      - name: Register and run GitLab Runner
+        run: |
+          set -euo pipefail
+          runner_name="gh-linux-${GITHUB_RUN_ID}"
+          mkdir -p "$(dirname "$RUNNER_CONFIG")" "$RUNNER_WORKDIR"
+
+          gitlab-runner register \
+            --config "$RUNNER_CONFIG" \
+            --non-interactive \
+            --url "$GITLAB_URL" \
+            --token "$GITLAB_RUNNER_TOKEN" \
+            --name "$runner_name" \
+            --executor docker \
+            --docker-image alpine:3.20 \
+            --docker-volumes /cache \
+            --docker-volumes /var/run/docker.sock:/var/run/docker.sock \
+            --tag-list '${{ inputs.runner_tags }}' \
+            --run-untagged=false \
+            --locked=false
+
+          python3 - "$RUNNER_CONFIG" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+          text = re.sub(r"^concurrent = \d+", "concurrent = 4", text, count=1, flags=re.M)
+          if "request_concurrency" in text:
+              text = re.sub(r"request_concurrency = \d+", "request_concurrency = 4", text)
+          else:
+              text = text.replace("  executor =", "  request_concurrency = 4\n  executor =", 1)
+          path.write_text(text)
+          PY
+
+          cleanup() {
+            gitlab-runner unregister --config "$RUNNER_CONFIG" --name "$runner_name" || true
+          }
+          trap cleanup EXIT INT TERM
+
+          echo "GitLab SaaS runner $runner_name is accepting pipeline ${{ inputs.pipeline_id }} at ref ${{ inputs.gitlab_ref }}"
+          gitlab-runner run \
+            --config "$RUNNER_CONFIG" \
+            --working-directory "$RUNNER_WORKDIR"
